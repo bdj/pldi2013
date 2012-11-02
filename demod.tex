@@ -1,0 +1,213 @@
+\documentclass[preprint]{sigplanconf}
+
+% The following \documentclass options may be useful:
+%
+% 10pt          To set in 10-point type instead of 9-point.
+% 11pt          To set in 11-point type instead of 9-point.
+% authoryear    To obtain author/year citation style instead of numeric.
+
+\usepackage{amsmath}
+
+\begin{document}
+
+\conferenceinfo{PLDI '13}{16 June 2013, Seattle, Washington, USA.} 
+\copyrightyear{2013} 
+\copyrightdata{[to be supplied]} 
+
+\titlebanner{banner above paper title}        % These are ignored unless
+\preprintfooter{short description of paper}   % 'preprint' option specified.
+
+\title{Enabling Optimizations through Demodularization} 
+
+\authorinfo{Blake Johnson}
+           {Brigham Young University}
+           {blake.johnson@byu.edu}
+\authorinfo{Jay McCarthy}
+           {Brigham Young University}
+           {jay@cs.byu.edu}
+
+\maketitle
+
+\begin{abstract}
+Programmers want to write modular programs to increase maintainability and create abstractions, but modularity hampers optimizations, especially when modules are compiled separately or written in different languages. 
+In languages with syntactic extension capabilities, each module in a program can be written in a separate language, and the module system must ensure that the modules interoperate correctly. 
+In Racket, the module system ensures this by separating module code into phases for runtime and compile-time and allowing phased imports and exports inside modules. 
+For example, many Racket modules import the list module for compile-time so that macros can use lists, while also importing the list module for runtime so their runtime code can use lists as well.
+We present an algorithm, called demodularization, that combines all executable code from a phased modular program into a single module that can then be optimized as a whole program. 
+The demodularized programs have the same behavior as their modular counterparts but are easier to optimize. 
+We show that programs maintain their meaning through an operational semantics of the demodularization process and verify that performance increases by running the algorithm and existing optimizations on Racket programs.
+\end{abstract}
+
+\category{CR-number}{subcategory}{third-level}
+
+\terms
+term1, term2
+
+\keywords
+keyword1, keyword2
+
+\section{Introduction}
+
+Programmers should not have to sacrifice the software engineering goals of modular design and good abstractions for performance. 
+Instead, their tools should make running a well-designed program as efficient as possible. 
+Many languages provide features for creating modular programs, which enable separate compilation and module reuse.
+Some languages provide expressive macro systems, which enable programmers to extend the compiler in arbitrary ways.
+Combining module systems with expressive macro systems allow programmers to write modular programs with each module written in its own domain-specific language.
+A compiler for such a language must ensure that modular programs have the same meaning no matter the order in which the modules are compiled.
+A phased module system, like the one described by Flatt () for Racket, is a way to allow both separately compiled modules and expressive macros in a language.
+
+Modular programs are difficult to optimize because the compiler has little to no information about values that come from other modules when compiling a single module.
+Existing optimizations have even less information when modules can extend the compiler. 
+Good abstractions are meant to obscure internal implementations so that it is easier for programmers to reason about their programs, but this obscurity also limits information available for optimizations.  
+In contrast, non-modular programs are simpler to optimize because the compiler has information about every value in the program.
+
+Some languages avoid the problem of optimizing modular programs by not allowing modules, while others do optimizations at link time, and others use inlining. 
+Not allowing modules defeats the benefits of modular design. 
+Link time optimizations can be too low level to do useful optimizations. 
+Inlining must be heuristic-based, and good heuristics are hard to develop. 
+
+Our solution for optimizing modular programs, called demodularization, is to transform a modular program into a non-modular program by combining all runtime code and data in the program into a single module.
+In a phased module system, finding all of the runtime values is not trivial.
+Phased module systems allow programmers to refer to the same module while writing compiler extensions and while writing normal programs.
+A demodularized program does not need to include modules that are only needed during compile-time, but whether or not the module is needed only at compile-time is not obvious from just examining the module in isolation. 
+
+A program with a single module is effectively a non-modular program. After demodularization, a program becomes a single module, so existing optimizations have more information to work with. Also, it enables new optimizations that need whole program information. 
+
+We provide an operational semantics for a simple language with a phased module system, and show that the demodularization process preserves program meaning. We also provide an implementation of demodularization for the Racket programming language, and verify experimentally that programs perform better after demodularization.
+
+We use the operational semantics model of the demodularization process to explain why demodularization is correct, then describe an actual implementation for Racket, followed by experimental results of demodularizing and optimizing real-world Racket programs. The operational semantics model removes the unnecessary details of the full implementation so the demodularization process is easier to understand and verify. The actual implementation presents interesting difficulties that the model does not. The experimental results show that demodularization improves performance, especially when a program is highly modular. 
+
+\section{Intuition}
+
+Evaluation of a modular Racket program, such as the program in Figure 1, illustrates how a phased module system works. 
+The main module of this program includes a queue library and uses it to do a few queue operations. 
+The queue library chooses which queue implementation to use based on the length of the initial queue size. 
+Each queue implementation is in a separate module. 
+The Racket runtime evaluates the program by first compiling the main module. 
+When compilation encounters a required module, it compiles that module. 
+Modules can contain macros, like the one in queue.rkt, which the runtime expands during compilation.
+
+
+
+
+
+
+
+
+
+
+
+
+
+Compilation and Evaluation of modular Racket program, such as the one in Figure 1, illustrates how a phased module system works. 
+First, the compiler expands all of the macros in the main module. 
+This expansion may trigger compilation of other modules that the main module uses inside its macros.
+After expansion, modules contain executable code separated into phases.
+Phase 0 code is code that will be executed by running the program.
+All other phases contain code that is available for use by other modules, but doesn't impact the execution of the module.
+Evaluation of a module proceeds by executing all phase 0 code in a module and in the modules it imports.
+Every time the evaluation hits a require expression, execution of the current module stops, and the required module is evaluated.
+Again, only phase 0 code of the required module is executed.
+A phased module system allows an import to be required at a different phase than phase 0.
+
+Formulate a good example with ~3 modules that have interesting phasing.
+Maybe the example can be a macro that chooses between data structures at compile time.
+
+\section{Model}
+
+Grammar.
+
+Sample program.
+
+Compiled version.
+
+Evaluation of program.
+
+Demodularization of program.
+
+Evaluation of demodularized program.
+
+Argue that the evaluations are the same.
+
+\section{Implementation}
+
+The demodularization algorithm for the Racket module system operates on Racket bytecode. 
+Racket's bytecode format is one step removed from the fully-expanded kernel language: instead of identifiers for bindings, it uses locations.
+For toplevel bindings, these locations point to memory allocated for each module known as the module's prefix.
+So, in Figure XXX, foo would be in prefix location 0 and bar would be in prefix location 1, and all the references to foo and bar are replaced with references to 0 and 1.
+Like in the model, the algorithm combines all phase 0 code into a single module, but since the references are locations instead of identifiers, the locations of different modules overlap.
+We solve this by extending the prefix of the main module to have locations for the required module's toplevel identifiers, and then adjusting the toplevel references in the required module to those new locations. 
+
+After combining all the code for a program into a single module, we want to optimize it.
+The existing optimizations for Racket operate on an intermediate form that is part way between fully-expanded code and bytecode. 
+Therefore, to hook into the existing optimizations, we decompile the bytecode of the demodularized program into the intermediate form and then run it through the optimizer to produce bytecode once more.
+
+\section{Evaluation}
+   \begin{enumerate} 
+   \item What is to be measured?
+   
+   Performance of modular programs and demodularized programs.
+  
+   \item How is it to be evaluated?
+   
+   Speed, program size, and memory usage. Also a measure of program modularity vs these things. Modularity means how many cross module references a program has.
+
+   \item Should the experimental results correspond to predictions made by a model?
+ 
+   The model doesn't include optimizations, so no.
+
+   \item Have appropriate baselines been identified?
+
+   The baseline is the modular program before demodularization.
+
+   \item What are the variables?
+
+   Modularity, cpu caches, runtime startup.
+
+   \item Are statistical methods necessary for validation?
+
+   No, because any change in performance is significant, and we are not trying to show correlation.
+
+   \end{enumerate}
+
+
+   \subsection{Testing Methodology}
+
+   Talk to stats people to make a good test
+   
+   \subsection{Results}
+
+   Explain results and why they matter
+
+
+
+\section{Related Work}
+   \subsection{External Link-time Optimization}
+
+   Explain efforts to do link time optimization in languages like C 
+   
+   \subsection{Cross-module Inlining}
+
+   Explain difficulty of finding good heuristics. Matthias Blume on lambda splitting.
+
+  
+
+\section{Conclusion}
+
+Demodularization is cool.
+
+% We recommend abbrvnat bibliography style.
+
+\bibliographystyle{abbrvnat}
+
+% The bibliography should be embedded for final submission.
+
+\begin{thebibliography}{}
+\softraggedright
+
+\bibitem[Smith et~al.(2009)Smith, Jones]{smith02}
+P. Q. Smith, and X. Y. Jones. ...reference text...
+
+\end{thebibliography}
+
+\end{document}
