@@ -7,6 +7,7 @@
 % authoryear    To obtain author/year citation style instead of numeric.
 
 \usepackage{amsmath}
+\usepackage{slatex}
 
 \begin{document}
 
@@ -32,7 +33,6 @@
 Programmers want to write modular programs to increase maintainability and create abstractions, but modularity hampers optimizations, especially when modules are compiled separately or written in different languages. 
 In languages with syntactic extension capabilities, each module in a program can be written in a separate language, and the module system must ensure that the modules interoperate correctly. 
 In Racket, the module system ensures this by separating module code into phases for runtime and compile-time and allowing phased imports and exports inside modules. 
-For example, many Racket modules import the list module for compile-time so that macros can use lists, while also importing the list module for runtime so their runtime code can use lists as well.
 We present an algorithm, called demodularization, that combines all executable code from a phased modular program into a single module that can then be optimized as a whole program. 
 The demodularized programs have the same behavior as their modular counterparts but are easier to optimize. 
 We show that programs maintain their meaning through an operational semantics of the demodularization process and verify that performance increases by running the algorithm and existing optimizations on Racket programs.
@@ -79,39 +79,202 @@ We use the operational semantics model of the demodularization process to explai
 
 \section{Intuition}
 
-Evaluation of a modular Racket program, such as the program in Figure 1, illustrates how a phased module system works. 
-The main module of this program includes a queue library and uses it to do a few queue operations. 
-The queue library chooses which queue implementation to use based on the length of the initial queue size. 
-Each queue implementation is in a separate module. 
-The Racket runtime evaluates the program by first compiling the main module. 
-When compilation encounters a required module, it compiles that module. 
-Modules can contain macros, like the one in queue.rkt, which the runtime expands during compilation.
+The Racket program in Figure~\ref{main-rkt} is the main module of a program that uses a queue library. 
+In order to understand how this program would be demodularized, we first need to understand how it is evaluated by the Racket runtime.
 
+\begin{figure}[h]
+\begin{schemedisplay}
+#lang racket/base
+(require "queue.rkt")
 
+(with-queue (1 2 3 4 5 6)
+  (enqueue 4)
+  (displayln (dequeue))
+  (displayln (dequeue)))
+\end{schemedisplay}
+\caption{\texttt{main.rkt}}
+\label{main-rkt}
+\end{figure}
 
+The first thing that the Racket runtime does to a program is compile it to bytecode. 
+Because Racket allows extensions to the compiler in the form of macros, while a module is being compiled, it also expands any uses of macros in the programs.
+The program in Figure~\ref{main-rkt} uses a macro called \scheme{with-queue}. 
+The \scheme{with-queue} macro is defined in \texttt{queue.rkt} in Figure~\ref{queue-rkt}.
 
+\begin{figure}[h]
+\begin{schemedisplay}
+#lang racket/base
+(require (for-syntax racket/base
+                     racket/syntax)
+         "short-queue.rkt"
+         "long-queue.rkt")
 
+(define-syntax (with-queue stx)
+  (syntax-case stx ()
+    [(with-queue (v ...) e ...)
+     (begin
+       (define type 
+         (if (> (length (syntax->list #'(v ...))) 5) 
+	     'long 
+             'short))
+       (define make-queue 
+         (format-id #'stx "make-~a-queue" type))
+       (define enqueue (format-id #'stx "~a-enqueue" type))
+       (define dequeue (format-id #'stx "~a-dequeue" type))
+       #`(let ([q (#,make-queue v ...)])
+           (define (#,(datum->syntax stx 'dequeue)) 
+             (#,dequeue q))
+           (define (#,(datum->syntax stx 'enqueue) x)
+             (#,enqueue q x))
+           e ...))]))
 
+(provide with-queue)
+\end{schemedisplay}
+\caption{\texttt{queue.rkt}}
+\label{queue-rkt}
+\end{figure}
 
+This macro creates bindings for \scheme{enqueue} and \scheme{dequeue} inside of a \scheme{with-queue} block and chooses whether to use a long or short queue implementation based on the initial size of the queue.
+The implementations for the long and short queues are also in separate modules. 
+For the purposes of this example, the long queues are implemented with vectors and the short queues are implemented with lists, as seen in Figures~\ref{long-queue-rkt} and \ref{short-queue-rkt}.
 
+\begin{figure}[h]
+\begin{schemedisplay}
+#lang racket/base
+(define (make-long-queue . vs)
+  .... make-vector ....)
 
+(define (long-enqueue q v)
+  .... vector-set! ....)
 
+(define (long-dequeue q)
+  .... vector-ref ....)
 
+(provide (all-defined-out))
+\end{schemedisplay}
+\caption{\texttt{long-queue.rkt}}
+\label{long-queue-rkt}
+\end{figure}
 
+\begin{figure}[h]
+\begin{schemedisplay}
+#lang racket/base
+(define (make-short-queue . vs)
+  .... list ....)
 
-Compilation and Evaluation of modular Racket program, such as the one in Figure 1, illustrates how a phased module system works. 
-First, the compiler expands all of the macros in the main module. 
-This expansion may trigger compilation of other modules that the main module uses inside its macros.
-After expansion, modules contain executable code separated into phases.
-Phase 0 code is code that will be executed by running the program.
-All other phases contain code that is available for use by other modules, but doesn't impact the execution of the module.
-Evaluation of a module proceeds by executing all phase 0 code in a module and in the modules it imports.
-Every time the evaluation hits a require expression, execution of the current module stops, and the required module is evaluated.
-Again, only phase 0 code of the required module is executed.
-A phased module system allows an import to be required at a different phase than phase 0.
+(define (short-enqueue q v)
+  .... cons ....)
 
-Formulate a good example with ~3 modules that have interesting phasing.
-Maybe the example can be a macro that chooses between data structures at compile time.
+(define (short-dequeue q)
+  .... list-ref ....)
+
+(provide (all-defined-out))
+\end{schemedisplay}
+\caption{\texttt{short-queue.rkt}}
+\label{short-queue-rkt}
+\end{figure}
+
+All four of these modules together make up the whole program.
+When compilation encounters a \scheme{require} expression, it compiles the required module so that any bindings the required module provides can be used in compiling the current module.
+In this example, the Racket runtime begins compiling \texttt{main.rkt}, then hits the \scheme{require} expression for \texttt{queue.rkt} and compiles it, which in turn triggers compiliation of \texttt{short-queue.rkt} and \texttt{long-queue.rkt}. 
+After compiling the queue implementations, the compiler finishes compiling \texttt{queue.rkt} so that the \scheme{with-queue} macro is ready for use.
+When the compiler encounters the call to \scheme{with-queue} in \texttt{main.rkt}, it uses the version it just compiled to transform the syntax of \texttt{main.rkt} into the code in Figure~\ref{main-rkt-expanded}.
+
+\begin{figure}[h]
+\begin{schemedisplay}
+(module main racket/base
+  (#%module-begin
+   (require "queue.rkt")
+   (let ((q (make-long-queue 1 2 3 4 5 6)))
+     (define (dequeue) (long-dequeue q))
+     (define (enqueue x) (long-enqueue q x))
+     (enqueue 4)
+     (displayln (dequeue))
+     (displayln (dequeue)))))
+\end{schemedisplay}
+\caption{\texttt{main.rkt} expanded}
+\label{main-rkt-expanded}
+\end{figure}
+
+Because there were more than five initial values, the macro expanded into a use of the long-queue implementation.
+Notice that although this macro is intended to be an optimization by choosing the correct data structure implementation, there are still optimizations that cannot be made because of the module boundary between the implementation and uses of the \scheme{long-queue} functions.
+The runtime finishes by turning the expanded code into bytecode and then evaluating the bytecode.
+Evaluation begins with the main module's bytecode, and also traces requires to evaluate any runtime code in each required module.
+In this example, the runtime would follow the \scheme{require} for \texttt{queue.rkt} and then follow the \scheme{require} for each queue implementation. 
+The queue implementations would install definitions for each of their provided functions, then the body of \texttt{main.rkt} would run.
+
+The main idea behind demodularization is to run the same code that would be run in this evaluation process, but put it all into a single module.
+For a program like the one in Figure~\ref{main-rkt}, this would entail placing all of the expanded code of each module into a single module, which would look like Figure~\ref{main-demod-rkt}.
+
+\begin{figure}[h]
+\begin{schemedisplay}
+(module main racket/base
+  (#%module-begin
+   (define (make-short-queue . vs)
+    .... list ....)
+
+   (define (short-enqueue q v)
+    .... cons ....)
+
+   (define (short-dequeue q)
+    .... list-ref ....)
+
+   (define (make-long-queue . vs)
+    .... make-vector ....)
+
+   (define (long-enqueue q v)
+    .... vector-set! ....)
+
+   (define (long-dequeue q)
+    .... vector-ref ....)
+
+   (let ((q (make-long-queue 1 2 3 4 5 6)))
+     (define (dequeue) (long-dequeue q))
+     (define (enqueue x) (long-enqueue q x))
+     (enqueue 4)
+     (displayln (dequeue))
+     (displayln (dequeue)))))
+\end{schemedisplay}
+\caption{\texttt{main.rkt} demodularized}
+\label{main-demod-rkt}
+\end{figure}
+
+Notice that we do not include the code from \texttt{queue.rkt} because it is only used during compile-time.
+The phased module system of Racket separates runtime and compile-time into numbered phases, starting at phase 0.
+Compile-time code is phase 1, and can only use code available at phase 1. 
+This is the reason for the \scheme{for-syntax} \scheme{require} expressions in Figure~\ref{queue-rkt}. 
+Although the module has access to \scheme{racket/base} bindings at phase 0, it doesn't have access to those bindings at phase 1, which is the phase that the body of the \scheme{with-queue} macro is evaulated in.
+Macros are special because they provide a link between two phases. 
+The binding is available at phase 0, but the code is written in phase 1.
+This phase separation allows macros and code to coexist across multiple modules and still be compiled separately and deterministically.
+Also, macro implementations can use macros, creating phases higher than 1, and the templates inside macros can refer to code in negative phases.
+When tracing \scheme{require} expressions to find code to include in the demodularized program, we only need to include phase 0 code.
+Because modules can be required at a phase relative to the current module, discovering phase 0 code must also take this phase shifting into account.
+The redex model will go into more detail about how the phased imports and exports impact the demodularization process.
+
+The program in Figure~\ref{main-demod-rkt} is in a single module and when evaluated will run the same code as before demodularization, except for module loading.
+While this is a slight improvement in performace, we lose the benefit of separate compilation.
+The real benefit is now the program can be optimized much more aggressively now that all of the information about the program is in one place.
+Figure~\ref{main-demod-opt-rkt} shows what the program looks like after optimization.
+
+\begin{figure}[h]
+\begin{schemedisplay}
+(module main racket/base
+  (#%module-begin
+   (let ((q (.... make-vector .... 1 2 3 4 5 6 ....)))
+     (.... vector-set .... 4 ....)
+     (displayln (.... vector-ref ....))
+     (displayln (.... vector-ref ....)))))
+\end{schemedisplay}
+\caption{\texttt{main.rkt} demodularized and optimized}
+\label{main-demod-opt-rkt}
+\end{figure}
+
+Notice that now all of the \scheme{long-queue} operations can be inlined and we don't need the definitions anymore.
+Also, the \scheme{short-queue} definitions can be eliminated because they are never used in the program.
+Finally, because all the information about the queue is known, this program could be optimized into just printing out the final answers because the program is deterministic.
+Demodularizing a program like \texttt{main.rkt} allows for optimizations that cannot be performed when the program is separated into modules.
+
 
 \section{Model}
 
